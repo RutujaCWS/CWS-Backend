@@ -74,7 +74,7 @@ app.use("/uploads", express.static("uploads"));
 
 const allowedOrigins = [
   "https://www.creativewebsolution.life",
-  "https://cws-ems-client.vercel.app",
+  "https://cws-frontend-iota.vercel.app",
   "http://localhost:5173",
 ];
 
@@ -380,7 +380,7 @@ app.post(
       newEmployee.verifyToken = token;
       await newEmployee.save();
 
-      const verifyLink = `https://cws-ems-client.vercel.app/employee/verify/${
+      const verifyLink = `https://cws-frontend-iota.vercel.app/employee/verify/${
         newEmployee._id
       }/${encodeURIComponent(token)}`;
 
@@ -987,7 +987,7 @@ app.post("/sendpasswordlink", async (req, res) => {
       { new: true },
     );
     //console.log("setusertoken",setusertoken)
-    const forLink = `https://cws-ems-client.vercel.app/forgotpassword/${userfind._id}/${setusertoken.verifytoken}`;
+    const forLink = `https://cws-frontend-iota.vercel.app/forgotpassword/${userfind._id}/${setusertoken.verifytoken}`;
     const resetPasswordHtml = await rePasswordTemplate(forLink);
 
     if (setusertoken) {

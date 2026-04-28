@@ -1,4 +1,3 @@
-
 const express = require("express");
 const dotenv = require("dotenv");
 const bcrypt = require("bcrypt");
@@ -1512,6 +1511,7 @@ app.post("/attendance/:id/checkin", authenticate, async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
+
 app.post("/attendance/:id/checkout", authenticate, async (req, res) => {
   try {
     const { lat, lng, address, mode = "Office" } = req.body;
@@ -1593,10 +1593,7 @@ app.get("/attendance/today", authenticate, async (req, res) => {
     // Get all employees
     // Get all employees
     const employees = await User.find({
-      //added jayu
-      $expr: {
-        $in: [{ $toLower: "$role" }, ["hr", "manager", "employee", "Team_Leader"]],
-      },
+      role: { $in: ["hr", "manager", "employee", "Team_Leader"] },
     });
 
     // Get today's attendance records

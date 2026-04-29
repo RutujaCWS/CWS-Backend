@@ -1933,6 +1933,8 @@ app.get("/users/:id", async (req, res) => {
 //   }
 // });
 
+
+
 const Notification = require("./models/notificationSchema");
 
 
@@ -2039,6 +2041,56 @@ const Notification = require("./models/notificationSchema");
 //     res.status(500).json({ error: err.message });
 //   }
 // });
+//prateek code sandwich policy
+async function calculateWithSandwich(
+  employeeId,
+  start,
+  end,
+  holidays,
+  weeklyOffData,
+  duration,
+  leaveType
+) {
+
+  // 🔹 Base days
+  let totalDays =
+    duration === "half"
+      ? 0.5
+      : Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1;
+
+  // 🔹 Get adjacent leaves
+  const { prev, next } = await getAdjacentLeaves(
+    employeeId,
+    start,
+    end,
+    leaveType,
+    false
+  );
+
+  let extraDays = 0;
+
+  // 🔥 Sandwich from previous
+  if (prev) {
+    extraDays += getSandwichDays(
+      prev.dateTo,
+      start,
+      holidays,
+      weeklyOffData
+    );
+  }
+
+  // 🔥 Sandwich from next
+  if (next) {
+    extraDays += getSandwichDays(
+      end,
+      next.dateFrom,
+      holidays,
+      weeklyOffData
+    );
+  }
+
+  return totalDays + extraDays;
+}
 
 app.post("/leave/apply", async (req, res) => {
   try {
@@ -2091,7 +2143,6 @@ app.post("/leave/apply", async (req, res) => {
         return holidayDate === dateStr;
       });
     };
-
     const isSunday = (date) => getDayOfWeek(date) === 0;
 
     const isNthSaturdayOff = (date) => {
@@ -2107,41 +2158,91 @@ app.post("/leave/apply", async (req, res) => {
       isSunday(date) || isNthSaturdayOff(date) || isHoliday(date);
 
     // ❌ Block leave if start OR end is off day
-    if (isOffDay(start) || isOffDay(end)) {
-      return res.status(400).json({
-        error: "❌ Cannot apply leave on weekly off or holiday.",
-      });
-    }
+    // if (isOffDay(start) || isOffDay(end)) {
+    //   return res.status(400).json({
+    //     error: "❌ Cannot apply leave on weekly off or holiday.",
+    //   });
+    // }
+    const { prev , next } = await getAdjacentLeaves(
+      employeeId,
+      start,
+      end,
+      leaveType,
+      false
+    );
 
-    // -----------------------------
+    console.log("START:", start);
+    console.log("PREV LEAVE:", prev);
+
+    
+    // let finalStart = new Date(start);
+    // let finalEnd = new Date(end);
+    // let shouldMergePrev = false;
+    // let shouldMergeNext = false;
+    // const isWorkingSaturday = getDayOfWeek(start) === 6 && !isNthSaturdayOff(start);
+
+    // // -----------------------------
+    // // ✅ HR POLICY TOTAL CALCULATION
+    // // -----------------------------
+
+    // const totalDays = calculateTotalLeaveDays(
+    //   finalStart,
+    //   finalEnd,
+    //   weeklyOffData,
+    //   duration,
+    //   holidays
+    // );
+
+    // console.log("TOTAL DAYS (HR RULE):", totalDays);
+
+
+
+// -----------------------------
     // ✅ HR POLICY TOTAL CALCULATION
     // -----------------------------
 
-    const totalDays = calculateTotalLeaveDays(
+    // const totalDays = calculateTotalLeaveDays(
+    //   weeklyOffData,
+    //   duration,
+    //   holidays
+    // );
+
+    //const totalDays = calculateBaseDays(start, end, duration);
+    const totalDays = await calculateWithSandwich(
+      employeeId,
       start,
       end,
+      holidays,
       weeklyOffData,
       duration,
-      holidays
+      leaveType
     );
+    console.log("TOTAL DAYS (FINAL):", totalDays);
 
     console.log("TOTAL DAYS (HR RULE):", totalDays);
-
     // -----------------------------
     // Leave balance check
     // -----------------------------
 
-    if (leaveType === "SL" && employee.sickLeaveBalance < totalDays) {
-      return res.status(400).json({
-        error: `No Sick Leave balance. Required: ${totalDays}, Available: ${employee.sickLeaveBalance}`,
-      });
-    }
+    // if (leaveType === "SL" && employee.sickLeaveBalance < totalDays) {
+    //   return res.status(400).json({
+    //     error: `No Sick Leave balance. Required: ${totalDays}, Available: ${employee.sickLeaveBalance}`,
+    //   });
+    // }
 
-    if (leaveType === "CL" && employee.casualLeaveBalance < totalDays) {
-      return res.status(400).json({
-        error: `No Casual Leave balance. Required: ${totalDays}, Available: ${employee.casualLeaveBalance}`,
-      });
-    }
+    // if (leaveType === "CL" && employee.casualLeaveBalance < totalDays) {
+    //   return res.status(400).json({
+    //     error: `No Casual Leave balance. Required: ${totalDays}, Available: ${employee.casualLeaveBalance}`,
+    //   });
+    // }
+let warning = null;
+if (leaveType === "SL" && employee.sickLeaveBalance < totalDays) {
+  warning = `Only ${employee.sickLeaveBalance} days available. Remaining will be LOP`;
+}
+
+if (leaveType === "CL" && employee.casualLeaveBalance < totalDays) {
+  warning = `Only ${employee.casualLeaveBalance} days available. Remaining will be LOP`;
+}
 
     // Create leave
     const leave = new Leave({
@@ -2158,7 +2259,8 @@ app.post("/leave/apply", async (req, res) => {
     });
 
     await leave.save();
-let finalRole = employee.role?.toUpperCase() || "EMPLOYEE";
+
+    let finalRole = employee.role?.toUpperCase() || "EMPLOYEE";
     if (employee.role === "Team_Leader") finalRole = "Team_Leader";
     if (employee.role === "IT_Support") finalRole = "IT_Support";
     const teams = await Team.find({
@@ -2223,6 +2325,7 @@ let finalRole = employee.role?.toUpperCase() || "EMPLOYEE";
       message: "Leave applied successfully!",
       leave,
       totalDays,
+      warning,
     });
 
   } catch (err) {
@@ -2230,6 +2333,11 @@ let finalRole = employee.role?.toUpperCase() || "EMPLOYEE";
     res.status(500).json({ error: err.message });
   }
 });
+
+
+
+
+
 
 // rutuja api to get emp tl 26-03-2026
 app.get("/employee/:employeeId/team-leader", async (req, res) => {
@@ -2330,31 +2438,69 @@ app.get("/leave/team-leader/:teamLeadId", async (req, res) => {
 
 
 app.post("/leave/calculate", async (req, res) => {
-  const { dateFrom, dateTo, duration } = req.body;
+  try {
+    console.log("REQ BODY:", req.body);
+    const { employeeId, dateFrom, dateTo, duration, leaveType } = req.body;
 
-  const start = new Date(dateFrom);
-  const end = new Date(dateTo);
-  const weeklyOffData = await WeeklyOff.findOne({
-    year: new Date().getFullYear(),
-  });
+    const start = new Date(dateFrom);
+    const end = new Date(dateTo);
 
-  const holidayDocs = await Holiday.find();
+    start.setHours(0,0,0,0);
+    end.setHours(0,0,0,0);
 
-  const holidays = holidayDocs.map(h => ({
-    date: h.date
-  }));
+    // ✅ Weekly offs
+    const weeklyOffData = await WeeklyOff.findOne({
+      year: new Date().getFullYear(),
+    });
 
-  console.log("📅 Holidays in backend:", holidays);
+    // ✅ Holidays
+    const holidayDocs = await Holiday.find();
 
-  const totalDays = calculateTotalLeaveDays(
+    const holidays = holidayDocs.map(h => ({
+      date: h.date
+    }));
+
+    const { prev, next } = await getAdjacentLeaves(
+      employeeId,
+      start,
+      end,
+      leaveType,
+      true
+    );
+
+    let totalDays =
+      duration === "half"
+        ? 0.5
+        : Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1;
+        
+    let extraDays = 0;
+
+if (prev) {
+  extraDays += getSandwichDays(
+    prev.dateTo,
     start,
-    end,
-    weeklyOffData,
-    duration,
-    holidays
+    holidays,
+    weeklyOffData
   );
+} 
+if (next) {
+  extraDays += getSandwichDays(
+    end,
+    next.dateFrom,
+    holidays,
+    weeklyOffData
+  );
+}
 
-  res.json({ totalDays });
+totalDays += extraDays;
+
+    console.log("TOTAL DAYS (FINAL):", totalDays);
+    return res.json({ totalDays });
+
+  } catch (err) {
+    console.error("Error calculating leave:", err);
+    res.status(500).json({ error: "Calculation failed" });
+  }
 });
 
 
@@ -2789,6 +2935,170 @@ const normalizeDate = (date) => {
   return d;
 };
 
+// 🔹 Base days (no sandwich)
+function calculateBaseDays(start, end, duration) {
+  if (duration === "half") return 0.5;
+
+  return (
+    Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1
+  );
+}
+
+// 🔹 Check if date is off day
+function isOffDay(date, holidays, weeklyOffData) {
+  const day = date.getDay();
+
+  const isSunday = day === 0;
+
+  const isSaturday = day === 6;
+  const nth = Math.ceil(date.getDate() / 7);
+  const isOffSaturday = (weeklyOffData?.saturdays || [1, 3, 5]).includes(nth);
+
+  const isHoliday = holidays.some(
+    (h) => new Date(h.date).toDateString() === date.toDateString()
+  );
+
+  return isSunday || (isSaturday && isOffSaturday) || isHoliday;
+}
+
+
+function isNthSaturdayOff(date, weeklyOffData) {
+  if (getDayOfWeek(date) !== 6) return false;
+
+  const saturdayNumber = getSaturdayOfMonth(date);
+  const offSaturdays = weeklyOffData?.saturdays || [1, 3, 5];
+
+  return offSaturdays.includes(saturdayNumber);
+}
+
+function getSandwichDays(prevEnd, currentStart, holidays, weeklyOffData) {
+
+  let gapStart = new Date(prevEnd);
+  gapStart.setHours(0,0,0,0);
+  gapStart.setDate(gapStart.getDate() + 1);
+
+  let gapEnd = new Date(currentStart);
+  gapEnd.setHours(0,0,0,0);
+  gapEnd.setDate(gapEnd.getDate() - 1);
+
+  let temp = new Date(gapStart);
+  let gapDays = 0;
+  let allOff = true;
+
+  // 🔥 detect working Saturday (based on leave start)
+  // const leaveStartsOnWorkingSaturday =
+  //   getDayOfWeek(prevEnd) === 6 &&
+  //   !(
+  //     weeklyOffData?.saturdays || [1,3,5]
+  //   ).includes(getSaturdayOfMonth(prevEnd));
+
+  // while (temp <= gapEnd) {
+
+  //   const isSunday = getDayOfWeek(temp) === 0;
+
+  //   const isImmediateSunday =
+  //     isSunday && temp.getTime() === gapStart.getTime();
+
+  //   // ✅ skip Sunday sandwich
+  //   if (leaveStartsOnWorkingSaturday && isImmediateSunday) {
+  //     temp.setDate(temp.getDate() + 1);
+  //     continue;
+  //   }
+
+  //   if (!isOffDay(temp, holidays, weeklyOffData)) {
+  //     allOff = false;
+  //     break;
+  //   }
+
+  //   gapDays++;
+  //   temp.setDate(temp.getDate() + 1);
+  // }
+  while (temp <= gapEnd) {
+
+  const isSunday = getDayOfWeek(temp) === 0;
+
+  // 🔥 FIX: if previous day is working Saturday → skip Sunday
+  const prevDay = new Date(temp);
+  prevDay.setDate(prevDay.getDate() - 1);
+
+  const isPrevWorkingSaturday =
+    getDayOfWeek(prevDay) === 6 &&
+    !isNthSaturdayOff(prevDay, weeklyOffData);
+    //!isNthSaturdayOff(prevDay);
+
+  if (isSunday && isPrevWorkingSaturday) {
+    temp.setDate(temp.getDate() + 1);
+    continue; // ❌ skip Sunday sandwich
+  }
+
+  if (!isOffDay(temp, holidays, weeklyOffData)) {
+    allOff = false;
+    break;
+  }
+
+  gapDays++;
+  temp.setDate(temp.getDate() + 1);
+}
+  return allOff ? gapDays : 0;
+}
+
+// 🔹 Get adjacent leaves
+async function getAdjacentLeaves(employeeId, start, end, leaveType, includePending = false) {
+  const statusFilter = includePending
+    ? { $in: ["pending", "approved"] } // UI preview
+    : "approved"; // final logic
+  const prev = await Leave.findOne({
+    employee: employeeId,
+    leaveType,
+    // status: "approved",
+    // status: { $in: ["pending", "approved"] },
+    status: statusFilter,
+    dateTo: { $lt: start },
+  }).sort({ dateTo: -1 });
+
+  const next = await Leave.findOne({
+    employee: employeeId,
+    leaveType,
+    //status: "approved",
+    //status: { $in: ["pending", "approved"] },
+    status: statusFilter,
+    dateFrom: { $gt: end },
+  }).sort({ dateFrom: 1 });
+
+  return { prev, next };
+}
+
+// 🔥 Get final day status
+const getDayStatus = async (employeeId, date) => {
+  const normalized = normalizeDate(date);
+
+  // 1. Check leave
+  const leave = await Leave.findOne({
+    employee: employeeId,
+    status: "approved",
+    dateFrom: { $lte: normalized },
+    dateTo: { $gte: normalized },
+  });
+
+  if (leave) return "LEAVE";
+
+  // 2. Check attendance
+  const attendance = await Attendance.findOne({
+    employee: employeeId,
+    date: normalized,
+  });
+
+  if (attendance && attendance.checkIn) return "PRESENT";
+
+  // 3. Otherwise
+  return "ABSENT";
+};
+
+
+
+
+
+
 const formatDateLocal = (date) => {
   const d = normalizeDate(date);
   const year = d.getFullYear();
@@ -2806,6 +3116,113 @@ const getSaturdayOfMonth = (date) => {
   return Math.ceil(d.getDate() / 7);
 };
 
+
+// const calculateTotalLeaveDays = (
+//   start,
+//   end,
+//   weeklyOffData,
+//   duration,
+//   holidays = []
+// ) => {
+//   const startDate = normalizeDate(start);
+//   const endDate = normalizeDate(end);
+//   console.log("📅 Holidays in backend:", holidays);
+//   // 🔹 Safety guard (avoid infinite loop)
+//   const MAX_DAYS = 366;
+
+//   const isHoliday = (date) => {
+//   const dateStr = formatDateLocal(date);
+
+//   return holidays.some((h) => {
+//     const holidayDate =
+//       typeof h.date === "string"
+//         ? h.date
+//         : formatDateLocal(h.date);
+
+//     return holidayDate === dateStr;
+//   });
+// };
+
+//   const isSunday = (date) => getDayOfWeek(date) === 0;
+
+//   const isNthSaturdayOff = (date) => {
+//     if (getDayOfWeek(date) !== 6) return false;
+
+//     const saturdayNumber = getSaturdayOfMonth(date);
+//     const offSaturdays = weeklyOffData?.saturdays || [1, 3, 5];
+
+//     return offSaturdays.includes(saturdayNumber);
+//   };
+
+//   const isOffDay = (date) =>
+//     isSunday(date) || isNthSaturdayOff(date) || isHoliday(date);
+
+  
+//   let expandedStart = new Date(startDate);
+//   let expandedEnd = new Date(endDate);
+
+//   // 🔹 Expand backward (continuous chain rule)
+//   let count = 0;
+//   while (count < MAX_DAYS) {
+//     const prev = new Date(expandedStart);
+//     prev.setDate(prev.getDate() - 1);
+
+//     if (isOffDay(prev)) {
+//       expandedStart = prev;
+//     } else {
+//       break;
+//     }
+//     count++;
+//   }
+
+//   // 🔹 Expand forward
+//   count = 0;
+//   while (count < MAX_DAYS) {
+//     const next = new Date(expandedEnd);
+//     next.setDate(next.getDate() + 1);
+
+//     if (isOffDay(next)) {
+//       expandedEnd = next;
+//     } else {
+//       break;
+//     }
+//     count++;
+//   }
+
+//   let totalDays =
+//     (normalizeDate(expandedEnd) - normalizeDate(expandedStart)) /
+//       (1000 * 60 * 60 * 24) + 1;
+
+//   // 🔹 2nd / 4th Saturday exception
+//   const leaveStartsOnSecondOrFourthSaturday =
+//     getDayOfWeek(startDate) === 6 &&
+//     [2, 4].includes(getSaturdayOfMonth(startDate));
+
+//   if (leaveStartsOnSecondOrFourthSaturday) {
+//     const sundayAfterStart = new Date(startDate);
+//     sundayAfterStart.setDate(sundayAfterStart.getDate() + 1);
+
+//     if (
+//       getDayOfWeek(sundayAfterStart) === 0 &&
+//       sundayAfterStart <= expandedEnd
+//     ) {
+//       totalDays -= 1;
+//     }
+//   }
+
+//   // 🔹 Half-day override
+//   if (duration === "half") {
+//     return 0.5;
+//   }
+
+//   return totalDays;
+// };
+
+
+// ===============================
+// Off-Day Logic
+// ===============================
+
 const calculateTotalLeaveDays = (
   start,
   end,
@@ -2815,242 +3232,103 @@ const calculateTotalLeaveDays = (
 ) => {
   const startDate = normalizeDate(start);
   const endDate = normalizeDate(end);
-  console.log("📅 Holidays in backend:", holidays);
-  // 🔹 Safety guard (avoid infinite loop)
-  const MAX_DAYS = 366;
 
   const isHoliday = (date) => {
-  const dateStr = formatDateLocal(date);
-
-  return holidays.some((h) => {
-    const holidayDate =
-      typeof h.date === "string"
-        ? h.date
-        : formatDateLocal(h.date);
-
-    return holidayDate === dateStr;
-  });
-};
+    const dateStr = formatDateLocal(date);
+    return holidays.some((h) => {
+      const holidayDate =
+        typeof h.date === "string" ? h.date : formatDateLocal(h.date);
+      return holidayDate === dateStr;
+    });
+  };
 
   const isSunday = (date) => getDayOfWeek(date) === 0;
 
   const isNthSaturdayOff = (date) => {
     if (getDayOfWeek(date) !== 6) return false;
-
     const saturdayNumber = getSaturdayOfMonth(date);
     const offSaturdays = weeklyOffData?.saturdays || [1, 3, 5];
-
     return offSaturdays.includes(saturdayNumber);
   };
 
   const isOffDay = (date) =>
     isSunday(date) || isNthSaturdayOff(date) || isHoliday(date);
 
+  // ✅ Half-day
+  if (duration === "half") return 0.5;
+
+  let totalDays = 0;
+  let current = new Date(startDate);
+
+  while (current <= endDate) {
+    totalDays++;
+    current.setDate(current.getDate() + 1);
+  }
+
   
-  let expandedStart = new Date(startDate);
-  let expandedEnd = new Date(endDate);
+  const isWorkingSaturday =
+    getDayOfWeek(startDate) === 6 &&
+    !isNthSaturdayOff(startDate);
 
-  // 🔹 Expand backward (continuous chain rule)
-  let count = 0;
-  while (count < MAX_DAYS) {
-    const prev = new Date(expandedStart);
-    prev.setDate(prev.getDate() - 1);
+  if (isWorkingSaturday) {
+    const sunday = new Date(startDate);
+    sunday.setDate(sunday.getDate() + 1);
 
-    if (isOffDay(prev)) {
-      expandedStart = prev;
-    } else {
-      break;
+    if (
+      getDayOfWeek(sunday) === 0 &&
+      sunday <= endDate
+    ) {
+      totalDays -= 1; // ❌ remove Sunday
     }
-    count++;
   }
 
-  // 🔹 Expand forward
-  count = 0;
-  while (count < MAX_DAYS) {
-    const next = new Date(expandedEnd);
-    next.setDate(next.getDate() + 1);
-
-    if (isOffDay(next)) {
-      expandedEnd = next;
-    } else {
-      break;
-    }
-    count++;
-  }
-
-  let totalDays =
-    (normalizeDate(expandedEnd) - normalizeDate(expandedStart)) /
-      (1000 * 60 * 60 * 24) + 1;
-
-  // 🔹 2nd / 4th Saturday exception
-  const leaveStartsOnSecondOrFourthSaturday =
+  const isSecondOrFourthSaturday =
     getDayOfWeek(startDate) === 6 &&
     [2, 4].includes(getSaturdayOfMonth(startDate));
 
-  if (leaveStartsOnSecondOrFourthSaturday) {
-    const sundayAfterStart = new Date(startDate);
-    sundayAfterStart.setDate(sundayAfterStart.getDate() + 1);
+  if (isSecondOrFourthSaturday) {
+    const sunday = new Date(startDate);
+    sunday.setDate(sunday.getDate() + 1);
 
-    if (
-      getDayOfWeek(sundayAfterStart) === 0 &&
-      sundayAfterStart <= expandedEnd
-    ) {
+    if (getDayOfWeek(sunday) === 0 && sunday <= endDate) {
       totalDays -= 1;
     }
-  }
-
-  // 🔹 Half-day override
-  if (duration === "half") {
-    return 0.5;
   }
 
   return totalDays;
 };
 
 
-// ===============================
-// Off-Day Logic
-// ===============================
 
-const isDateHoliday = (date, holidays) => {
-  const dateStr = formatDateLocal(date);
-  return holidays.some(h => formatDateLocal(h.date) === dateStr);
-};
-
-const isSaturdayOff = (date, weeklyOffData) => {
-  const day = getDayOfWeek(date);
-  if (day !== 6) return false;
-
-  const saturdayOfMonth = getSaturdayOfMonth(date);
-  const offSaturdays = weeklyOffData?.saturdays || [1, 3, 5];
-
-  return offSaturdays.includes(saturdayOfMonth);
-};
-
-const isOffDay = (date, weeklyOffData, holidays) => {
-  const day = getDayOfWeek(date);
-
-  if (day === 0) return true; // Sunday
-  if (day === 6) return isSaturdayOff(date, weeklyOffData); // Saturday rule
-
-  return isDateHoliday(date, holidays); // Holiday
-};
 
 // ===============================
 // Sandwich Leave Logic (HR Policy Based)
 // ===============================
 
-const getSandwichDays = (start, end, weeklyOffData, holidays) => {
-  const sandwichDays = [];
-
-  const startDate = normalizeDate(start);
-  const endDate = normalizeDate(end);
-
-  // We check 7 days before & after leave range
-  const rangeStart = new Date(startDate);
-  rangeStart.setDate(rangeStart.getDate() - 7);
-
-  const rangeEnd = new Date(endDate);
-  rangeEnd.setDate(rangeEnd.getDate() + 7);
-
-  let current = new Date(rangeStart);
-
-  while (current <= rangeEnd) {
-    const checkDate = normalizeDate(current);
-
-    // Skip leave days
-    if (checkDate >= startDate && checkDate <= endDate) {
-      current.setDate(current.getDate() + 1);
-      continue;
-    }
-
-    // Only consider off-days
-    if (!isOffDay(checkDate, weeklyOffData, holidays)) {
-      current.setDate(current.getDate() + 1);
-      continue;
-    }
-
-    // Check backward connection to leave
-    let backward = new Date(checkDate);
-    let connectedBackward = false;
-
-    while (true) {
-      backward.setDate(backward.getDate() - 1);
-      if (backward < rangeStart) break;
-
-      if (!isOffDay(backward, weeklyOffData, holidays)) {
-        if (backward >= startDate && backward <= endDate) {
-          connectedBackward = true;
-        }
-        break;
-      }
-    }
-
-    // Check forward connection to leave
-    let forward = new Date(checkDate);
-    let connectedForward = false;
-
-    while (true) {
-      forward.setDate(forward.getDate() + 1);
-      if (forward > rangeEnd) break;
-
-      if (!isOffDay(forward, weeklyOffData, holidays)) {
-        if (forward >= startDate && forward <= endDate) {
-          connectedForward = true;
-        }
-        break;
-      }
-    }
-
-    // Sandwich condition: leave on either sides
-    if (connectedBackward || connectedForward) {
-
-      // ===============================
-      // SPECIAL EXCEPTION (Case B)
-      // If leave starts on 2nd or 4th Saturday,
-      // Sunday immediately after should NOT count
-      // ===============================
-
-      const isSunday = getDayOfWeek(checkDate) === 0;
-      const leaveStartsOnSecondOrFourthSaturday =
-        getDayOfWeek(startDate) === 6 &&
-        [2, 4].includes(getSaturdayOfMonth(startDate));
-
-      // Check if current date is Sunday immediately after startDate
-      const isImmediateSundayAfterStart =
-      isSunday &&
-      new Date(startDate).getTime() + 86400000 === checkDate.getTime();
-
-      if (leaveStartsOnSecondOrFourthSaturday && isImmediateSundayAfterStart) {
-        current.setDate(current.getDate() + 1);
-        continue;
-      }
-
-      sandwichDays.push(new Date(checkDate));
-    }
-
-    current.setDate(current.getDate() + 1);
-  }
-
-  return sandwichDays.sort((a, b) => a - b);
-};
 
 // 🟢 Main route — approve/reject leave with sandwich logic
 app.put("/leave/:leaveId/status", async (req, res) => {
   try {
+    const weeklyOffData = await WeeklyOff.findOne({
+      year: new Date().getFullYear(),
+    });
+
+    // 🔥 ALSO ADD HOLIDAYS (you are using it too)
+    const holidayDocs = await Holiday.find();
+
+    const holidays = holidayDocs.map(h => ({
+      date: h.date
+    }));
+
     const { status, userId, role } = req.body;
     const leaveId = req.params.leaveId;
 
     if (!["approved", "rejected"].includes(status)) {
-      return res.status(400).json({
-        error: "Invalid status",
-      });
+      return res.status(400).json({ error: "Invalid status" });
     }
 
-    if (!userId || !["manager", "admin","Team_Leader"].includes(role)) {
-      return res.status(400).json({
-        error: "Invalid userId or role",
-      });
+    if (!userId || !["manager", "admin"].includes(role)) {
+      return res.status(400).json({ error: "Invalid userId or role" });
     }
 
     const leave = await Leave.findById(leaveId).populate("employee");
@@ -3059,93 +3337,514 @@ app.put("/leave/:leaveId/status", async (req, res) => {
     const employee = leave.employee;
     if (!employee) return res.status(404).json({ error: "Employee not found" });
 
-    // if (role === "manager" && leave.reportingManager?.toString() !== userId) {
-    //   return res.status(403).json({ error: "Not authorized" });
-    // }
-
-    let isAuthorized = false;
-    
-    if (role === "admin") {
-      isAuthorized = true;
-    } 
-    else if (role === "manager") {
-      isAuthorized = leave.reportingManager?.toString() === userId;
-    } 
-    else if (role === "Team_Leader") {
-      const teams = await Team.find({ 
-        teamLead: userId,
-        assignToProject: { $in: [employee._id] }
-      });
-      isAuthorized = teams.length > 0;
+    if (role === "manager" && leave.reportingManager?.toString() !== userId) {
+      return res.status(403).json({ error: "Not authorized" });
     }
+    // ============================
+// 🔥 RESTORE LOGIC (IMPORTANT)
+// ============================
 
-    // ✅ APPROVAL BLOCK
-    if (status === "approved" && leave.status !== "approved") {
+// If already approved and now rejecting → restore balance
+if (leave.status === "approved" && status === "rejected") {
 
-      const totalLeaveDays = leave.totalDays || 0;
+  if (leave.leaveType === "SL") {
+    employee.sickLeaveBalance += leave.paidDays || 0;
+  }
 
-      if (leave.leaveType === "SL") {
-        if (employee.sickLeaveBalance < totalLeaveDays) {
-          return res.status(400).json({
-            error: "Not enough Sick Leave balance",
-          });
-        }
-        employee.sickLeaveBalance -= totalLeaveDays;
+  if (leave.leaveType === "CL") {
+    employee.casualLeaveBalance += leave.paidDays || 0;
+  }
 
-      } else if (leave.leaveType === "CL") {
-        if (employee.casualLeaveBalance < totalLeaveDays) {
-          return res.status(400).json({
-            error: "Not enough Casual Leave balance",
-          });
-        }
-        employee.casualLeaveBalance -= totalLeaveDays;
+  if (leave.lwpDays) {
+    employee.LwpLeave = Math.max(0, employee.LwpLeave - leave.lwpDays);
+  }
 
-      } else if (leave.leaveType === "LWP") {
-        employee.LwpLeave += totalLeaveDays;
+  await employee.save();
+
+  // 🔥 RE-CALCULATE ADJACENT LEAVES AFTER REJECTION
+
+const employeeId = leave.employee._id;
+
+  // 🔥 FIX ADJACENT LEAVE (REMOVE SANDWICH EFFECT)
+  const { prev, next } = await getAdjacentLeaves(
+    employeeId,
+    new Date(leave.dateFrom),
+    new Date(leave.dateTo),
+    leave.leaveType,
+  );
+
+  if (next && next.status === "approved") {
+
+    let newTotal = calculateBaseDays(
+      new Date(next.dateFrom),
+      new Date(next.dateTo),
+      next.duration
+    );
+
+    // next.totalDays = newTotal;
+    // next.isSandwich = false;
+
+    const recalculated = await calculateWithSandwich(
+  employee._id,
+  new Date(next.dateFrom),
+  new Date(next.dateTo),
+  holidays,
+  weeklyOffData,
+  next.duration,
+  next.leaveType
+);
+
+next.totalDays = recalculated;
+next.isSandwich = recalculated > calculateBaseDays(
+  new Date(next.dateFrom),
+  new Date(next.dateTo),
+  next.duration
+);
+
+    // 🔹 recalc paid/lwp
+    if (next.leaveType === "SL") {
+      const available = employee.sickLeaveBalance;
+
+      if (available >= newTotal) {
+        next.paidDays = newTotal;
+        next.lwpDays = 0;
+      } else {
+        next.paidDays = available;
+        next.lwpDays = newTotal - available;
       }
-
-      await employee.save();
     }
 
-    // ✅ Update status
+    else if (next.leaveType === "CL") {
+      const available = employee.casualLeaveBalance;
+
+      if (available >= newTotal) {
+        next.paidDays = newTotal;
+        next.lwpDays = 0;
+      } else {
+        next.paidDays = available;
+        next.lwpDays = newTotal - available;
+      }
+    }
+
+    else if (next.leaveType === "LWP") {
+      next.paidDays = 0;
+      next.lwpDays = newTotal;
+    }
+
+    await next.save();
+  }
+
+  if (prev && prev.status === "approved") {
+
+  let newTotal = calculateBaseDays(
+    new Date(prev.dateFrom),
+    new Date(prev.dateTo),
+    prev.duration
+  );
+
+  // prev.totalDays = newTotal;
+  // prev.isSandwich = false;
+
+  const recalculatedPrev = await calculateWithSandwich(
+  employee._id,
+  new Date(prev.dateFrom),
+  new Date(prev.dateTo),
+  holidays,
+  weeklyOffData,
+  prev.duration,
+  prev.leaveType
+);
+
+prev.totalDays = recalculatedPrev;
+prev.isSandwich = recalculatedPrev > calculateBaseDays(
+  new Date(prev.dateFrom),
+  new Date(prev.dateTo),
+  prev.duration
+);
+
+  await prev.save();
+}
+// for (let l of otherLeaves) {
+
+//   l.isMerged = false;
+
+//   const leaveStart = new Date(l.dateFrom);
+//   const leaveEnd = new Date(l.dateTo);
+
+//   let newTotal = calculateBaseDays(
+//     new Date(l.dateFrom),
+//     new Date(l.dateTo),
+//     l.duration
+//   );
+
+//   l.totalDays = newTotal;
+
+//   // 🔥 SL
+//   if (l.leaveType === "SL") {
+//     const available = employee.sickLeaveBalance;
+
+//     if (available >= newTotal) {
+//       l.paidDays = newTotal;
+//       l.lwpDays = 0;
+//     } else {
+//       l.paidDays = available;
+//       l.lwpDays = newTotal - available;
+//     }
+//   }
+
+//   // 🔥 CL
+//   else if (l.leaveType === "CL") {
+//     const available = employee.casualLeaveBalance;
+
+//     if (available >= newTotal) {
+//       l.paidDays = newTotal;
+//       l.lwpDays = 0;
+//     } else {
+//       l.paidDays = available;
+//       l.lwpDays = newTotal - available;
+//     }
+//   }
+
+//   // 🔥 LWP
+//   else if (l.leaveType === "LWP") {
+//     l.paidDays = 0;
+//     l.lwpDays = newTotal;
+//   }
+
+//   await l.save(); 
+// }
+}
+
+    // 🚨 Prevent double processing
+    if (leave.status === "approved" && status === "approved") {
+      return res.status(400).json({ error: "Leave already approved" });
+    }
+// ==============================
+// 🔥 SANDWICH USING ATTENDANCE
+// ==============================
+
+let extraLwpDays = 0;
+
+// if (status === "approved" && leave.status !== "approved" && extraDays === 0) {
+
+//   const prevDay = new Date(leave.dateFrom);
+//   prevDay.setDate(prevDay.getDate() - 1);
+
+//   const nextDay = new Date(leave.dateTo);
+//   nextDay.setDate(nextDay.getDate() + 1);
+
+//   const prevStatus = await getDayStatus(employee._id, prevDay);
+//   const nextStatus = await getDayStatus(employee._id, nextDay);
+
+//   let weekendDays = [];
+//   let temp = new Date(prevDay);
+
+//   while (temp <= nextDay) {
+//     if (getDayOfWeek(temp) === 0 || isOffDay(temp, holidays, weeklyOffData)) {
+//       weekendDays.push(new Date(temp));
+//     }
+//     temp.setDate(temp.getDate() + 1);
+//   }
+
+//   if (weekendDays.length > 0) {
+
+//     if (prevStatus === "ABSENT" && nextStatus === "ABSENT") {
+//       extraLwpDays += weekendDays.length;
+//     }
+
+//     if (prevStatus === "LEAVE" && nextStatus === "ABSENT") {
+//       extraLwpDays += weekendDays.length;
+//     }
+
+//     if (prevStatus === "ABSENT" && nextStatus === "LEAVE") {
+//       extraLwpDays += weekendDays.length;
+//     }
+//   }
+// }
+
+// ============================
+// ✅ APPROVAL LOGIC
+// ============================
+
+const { prev, next } = await getAdjacentLeaves(
+  employee._id,
+  new Date(leave.dateFrom),
+  new Date(leave.dateTo),
+  leave.leaveType,
+  false
+);
+
+let totalDays = calculateBaseDays(
+  new Date(leave.dateFrom),
+  new Date(leave.dateTo),
+  leave.duration
+);
+
+let extraDays = 0;
+if (status === "approved") {
+if (prev) {
+  extraDays += getSandwichDays(
+      prev.dateTo,
+      new Date(leave.dateFrom),
+      holidays,
+      weeklyOffData
+    );
+}
+
+if (next) {
+  extraDays += getSandwichDays(
+      new Date(leave.dateTo),
+      next.dateFrom,
+      holidays,
+      weeklyOffData
+    );
+}
+
+totalDays += extraDays;
+leave.isSandwich = extraDays > 0;
+}
+else {
+  // rejected → no sandwich
+  leave.isSandwich = false;
+}
+
+leave.totalDays = totalDays;
+leave.isSandwich = (totalDays > calculateBaseDays(
+  new Date(leave.dateFrom),
+  new Date(leave.dateTo),
+  leave.duration
+));
+
+if (status === "approved" && leave.status !== "approved" && extraDays === 0) {
+
+  const prevDay = new Date(leave.dateFrom);
+  prevDay.setDate(prevDay.getDate() - 1);
+
+  const nextDay = new Date(leave.dateTo);
+  nextDay.setDate(nextDay.getDate() + 1);
+
+  const prevStatus = await getDayStatus(employee._id, prevDay);
+  const nextStatus = await getDayStatus(employee._id, nextDay);
+
+  let weekendDays = [];
+  let temp = new Date(prevDay);
+
+  while (temp <= nextDay) {
+    if (getDayOfWeek(temp) === 0 || isOffDay(temp, holidays, weeklyOffData)) {
+      weekendDays.push(new Date(temp));
+    }
+    temp.setDate(temp.getDate() + 1);
+  }
+
+  if (weekendDays.length > 0) {
+
+    if (prevStatus === "ABSENT" && nextStatus === "ABSENT") {
+      extraLwpDays += weekendDays.length;
+    }
+
+    if (prevStatus === "LEAVE" && nextStatus === "ABSENT") {
+      extraLwpDays += weekendDays.length;
+    }
+
+    if (prevStatus === "ABSENT" && nextStatus === "LEAVE") {
+      extraLwpDays += weekendDays.length;
+    }
+  }
+}
+const totalLeaveDays = leave.totalDays || 0;
+
+// Use preview if already calculated
+let paidDays = leave.paidDays || 0;
+let lwpDays = leave.lwpDays || 0;
+
+if (status === "approved" && leave.status !== "approved") {
+
+  if (leave.isMerged) {
+  leave.totalDays = 0;
+  leave.paidDays = 0;
+  leave.lwpDays = 0;
+
+  // STOP ANY FURTHER PROCESSING
+  leave.status = status;
+  leave.approvedBy = userId;
+  leave.approvedByRole = role;
+
+  await leave.save();
+
+  
+  return res.json({
+    message: "Merged leave approved",
+    leave,
+  });
+}
+
+  // 🔥 If not calculated earlier, calculate now
+  if (!leave.isMerged && paidDays === 0 && lwpDays === 0) {
+
+    if (leave.leaveType === "SL") {
+      const available = employee.sickLeaveBalance;
+
+      if (available >= totalLeaveDays) {
+        paidDays = totalLeaveDays;
+      } else {
+        paidDays = available;
+        lwpDays = totalLeaveDays - available;
+      }
+    }
+
+    else if (leave.leaveType === "CL") {
+      const available = employee.casualLeaveBalance;
+
+      if (available >= totalLeaveDays) {
+        paidDays = totalLeaveDays;
+      } else {
+        paidDays = available;
+        lwpDays = totalLeaveDays - available;
+      }
+    }
+
+    else if (leave.leaveType === "LWP") {
+      lwpDays = totalLeaveDays;
+    }
+  }
+
+  // ============================
+  // 🔥 APPLY DEDUCTION (ALWAYS)
+  // ============================
+
+  if (leave.leaveType === "SL") {
+    employee.sickLeaveBalance -= paidDays;
+  }
+
+  else if (leave.leaveType === "CL") {
+    employee.casualLeaveBalance -= paidDays;
+  }
+
+  let totalLwpDays = lwpDays;
+
+  // Only apply attendance LWP for pure LWP type
+  if (leave.leaveType === "LWP") {
+    totalLwpDays += extraLwpDays;
+  }
+
+  if (totalLwpDays > 0) {
+    employee.LwpLeave += totalLwpDays;
+  }
+
+  
+
+  // ============================
+  // ✅ SAVE BREAKDOWN
+  // ============================
+  leave.paidDays = paidDays;
+  leave.lwpDays = totalLwpDays;
+  
+
+  await employee.save();
+}
+
+    // ============================
+    // ✅ UPDATE STATUS
+    // ============================
     leave.status = status;
     leave.approvedBy = userId;
     leave.approvedByRole = role;
+
     await leave.save();
-    
+
+// // find nearby leaves
+// const nearbyLeaves = await Leave.find({
+//   employee: employeeId,
+//   status: { $in: ["pending", "approved"] }
+// }).sort({ dateFrom: 1 });
+    // ============================
+    // 🔔 NOTIFICATIONS
+    // ============================
     let finalRole = role.toUpperCase();
     if (role === "Team_Leader") finalRole = "Team_Leader";
-
-    // 🔔 Notification for employee
+    if (role === "IT_Support") finalRole = "IT_Support";
+    
+    // 1️⃣ Notify the employee
     await Notification.create({
       user: employee._id,
       type: "Leave",
       message: `Your leave request (${new Date(
         leave.dateFrom
-      ).toDateString()} - ${new Date(leave.dateTo).toDateString()}) has been ${status}.`,
+      ).toDateString()} - ${new Date(
+        leave.dateTo
+      ).toDateString()}) has been ${status}.`,
       leaveRef: leave._id,
-      triggeredBy: userId,
-      triggeredByRole: finalRole
+      triggeredByRole: finalRole,  
     });
 
-    // 🔔 Notification for all admins
-    const admins = await User.find({ role: { $in: ["admin", "ceo"] } });
+    // 2️⃣ Notify admins/HR/CEO/COO/MD
+    const admins = await User.find({
+      role: { $in: ["admin", "hr", "ceo", "coo", "md"] },
+    });
+
     for (let admin of admins) {
       await Notification.create({
         user: admin._id,
         type: "Leave",
-        message: `${employee.name}'s leave request (${new Date(
-          leave.dateFrom
-        ).toDateString()} - ${new Date(leave.dateTo).toDateString()}) has been ${status} by ${role}.`,
+        message: `${employee.name}'s leave request (${new Date(leave.dateFrom).toDateString()} - ${new Date(leave.dateTo).toDateString()}) has been ${status} by ${role}.`,
         leaveRef: leave._id,
-        triggeredBy: userId,
-        triggeredByRole: finalRole
+        triggeredByRole: finalRole,  
       });
     }
 
+    // ✅ ADD THIS BLOCK - Notify Team Leaders
+    const teams = await Team.find({
+      assignToProject: { $in: [employee._id] }
+    }).populate("teamLead", "_id name role");
+
+    const notifiedTLs = new Set();
+
+    for (const team of teams) {
+      if (team.teamLead && team.teamLead.length) {
+        for (const tl of team.teamLead) {
+          if (tl && tl.role === "Team_Leader" && 
+              tl._id.toString() !== userId && 
+              !notifiedTLs.has(tl._id.toString())) {
+            
+            notifiedTLs.add(tl._id.toString());
+            
+            await Notification.create({
+              user: tl._id,
+              type: "Leave",
+              message: `${employee.name}'s leave request (${new Date(leave.dateFrom).toDateString()} - ${new Date(leave.dateTo).toDateString()}) has been ${status} by ${role}.`,
+              leaveRef: leave._id,
+              triggeredByRole: finalRole,
+              createdAt: new Date()
+            });
+          }
+        }
+      }
+    }
+
+    // ✅ ADD THIS BLOCK - Notify Reporting Manager (if different from approver)
+    if (leave.reportingManager && 
+        leave.reportingManager.toString() !== userId) {
+      await Notification.create({
+        user: leave.reportingManager,
+        type: "Leave",
+        message: `${employee.name}'s leave request (${new Date(leave.dateFrom).toDateString()} - ${new Date(leave.dateTo).toDateString()}) has been ${status} by ${role}.`,
+        leaveRef: leave._id,
+        triggeredByRole: finalRole,
+        createdAt: new Date()
+      });
+    }
+
+    // ============================
+    // ✅ FINAL RESPONSE
+    // ============================
     return res.json({
       message: `Leave ${status} successfully`,
       leave,
+      breakdown: {
+        totalDays: totalLeaveDays,
+        paidDays: leave.paidDays || 0,
+        lwpDays: leave.lwpDays || 0,
+      },
     });
 
   } catch (err) {
@@ -3153,6 +3852,8 @@ app.put("/leave/:leaveId/status", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+
 
 function isDateWithinRegularizationWindow(selectedDate) {
   const selected = new Date(selectedDate);

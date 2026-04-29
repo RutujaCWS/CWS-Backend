@@ -21,6 +21,10 @@ const leaveSchema = new mongoose.Schema({
   },//rutuja 07-04-26
   //approvedByName: { type: String }, // save approver name
   isSandwich: { type: Boolean, default: false }, // 👈 new field
+  totalDays: { type: Number, default: 0 },
+  paidDays: { type: Number, default: 0 },
+  lwpDays: { type: Number, default: 0 },
+  groupId: { type: String, default: null }
   
 });
 

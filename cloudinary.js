@@ -23,4 +23,12 @@ const storage = new CloudinaryStorage({
   },
 });
 
-export { cloudinary, storage };
+const ticketStorage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: "tickets",
+    resource_type: "auto",
+  },
+});
+
+export { cloudinary, storage  };

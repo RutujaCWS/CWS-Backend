@@ -1461,6 +1461,8 @@ app.post("/attendance/:id/checkin", authenticate, async (req, res) => {
     const { id } = req.params;
     const { lat, lng, address, mode = "Office" } = req.body;
 
+    
+
     if (!lat || !lng || !address) {
       return res.status(400).json({ message: "Location required" });
     }

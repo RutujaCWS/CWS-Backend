@@ -180,10 +180,22 @@ exports.deletePoll = async (req, res) => {
       return res.status(404).json({ message: "Poll not found" });
     }
 
+    const wasActive = poll.isActive;
+
      // Delete notification of this poll if delete
      await Notification.deleteMany({ pollRef: pollId });
 
     await Poll.findByIdAndDelete(pollId);
+
+    if (wasActive) {
+      const previousPoll = await Poll.findOne({})
+        .sort({ createdAt: -1 });
+
+      if (previousPoll) {
+        previousPoll.isActive = true;
+        await previousPoll.save();
+      }
+    }
     
     res.status(200).json({ 
       message: "Poll deleted successfully",

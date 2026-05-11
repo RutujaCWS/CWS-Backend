@@ -1475,7 +1475,7 @@ app.post("/attendance/:id/checkin", authenticate, async (req, res) => {
       return res.status(400).json({ message: "Already checked in" });
 
     if (mode === "Office") {
-      const office = await OfficeLocation.findOne({ name: "Pune Office" });
+      const office = await OfficeLocation.findOne({ name: "Creative Web Solution" });
       if (!office)
         return res.status(400).json({ message: "Office location not set" });
 

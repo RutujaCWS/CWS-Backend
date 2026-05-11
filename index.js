@@ -2440,71 +2440,45 @@ app.get("/leave/team-leader/:teamLeadId", async (req, res) => {
 
 
 app.post("/leave/calculate", async (req, res) => {
-  try {
-    console.log("REQ BODY:", req.body);
-    const { employeeId, dateFrom, dateTo, duration, leaveType } = req.body;
-
-    const start = new Date(dateFrom);
-    const end = new Date(dateTo);
-
-    start.setHours(0,0,0,0);
-    end.setHours(0,0,0,0);
-
-    // ✅ Weekly offs
-    const weeklyOffData = await WeeklyOff.findOne({
-      year: new Date().getFullYear(),
-    });
-
-    // ✅ Holidays
-    const holidayDocs = await Holiday.find();
-
-    const holidays = holidayDocs.map(h => ({
-      date: h.date
-    }));
-
-    const { prev, next } = await getAdjacentLeaves(
-      employeeId,
-      start,
-      end,
-      leaveType,
-      true
-    );
-
-    let totalDays =
-      duration === "half"
-        ? 0.5
-        : Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1;
-        
-    let extraDays = 0;
-
-if (prev) {
-  extraDays += getSandwichDays(
-    prev.dateTo,
-    start,
-    holidays,
-    weeklyOffData
-  );
-} 
-if (next) {
-  extraDays += getSandwichDays(
-    end,
-    next.dateFrom,
-    holidays,
-    weeklyOffData
-  );
-}
-
-totalDays += extraDays;
-
-    console.log("TOTAL DAYS (FINAL):", totalDays);
-    return res.json({ totalDays });
-
-  } catch (err) {
-    console.error("Error calculating leave:", err);
-    res.status(500).json({ error: "Calculation failed" });
-  }
+    try {
+      const { employeeId, dateFrom, dateTo, duration, leaveType } = req.body;
+  
+      const start = new Date(dateFrom);
+      const end = new Date(dateTo);
+  
+      start.setHours(0,0,0,0);
+      end.setHours(0,0,0,0);
+  
+      // Weekly offs
+      const weeklyOffData = await WeeklyOff.findOne({
+        year: new Date().getFullYear(),
+      });
+  
+      // Holidays
+      const holidayDocs = await Holiday.find();
+      const holidays = holidayDocs.map(h => ({
+        date: h.date
+      }));
+  
+      // :white_check_mark: SINGLE SOURCE OF TRUTH
+      const totalDays = await calculateWithSandwich(
+        employeeId,
+        start,
+        end,
+        holidays,
+        weeklyOffData,
+        duration,
+        leaveType
+      );
+      // console.log("TOTAL DAYS (FINAL):", totalDays);
+  
+      return res.json({ totalDays });
+  
+    } catch (err) {
+      console.error("Error calculating leave:", err);
+      res.status(500).json({ error: "Calculation failed" });
+    }
 });
-
 
 app.get("/notifications/:userId", async (req, res) => {
   try {
@@ -3044,30 +3018,360 @@ function getSandwichDays(prevEnd, currentStart, holidays, weeklyOffData) {
   return allOff ? gapDays : 0;
 }
 
+function getSurroundingOffDays(
+  start,
+  end,
+  holidays,
+  weeklyOffData
+) {
+
+  let extra = 0;
+
+  // =========================
+  // BACKWARD
+  // =========================
+
+  let temp = new Date(start);
+
+  temp.setDate(temp.getDate() - 1);
+
+  while (
+    isOffDay(
+      temp,
+      holidays,
+      weeklyOffData
+    )
+  ) {
+
+    extra++;
+
+    temp.setDate(temp.getDate() - 1);
+  }
+
+  // =========================
+  // FORWARD
+  // ONLY HOLIDAYS
+  // =========================
+
+  temp = new Date(end);
+
+  temp.setDate(temp.getDate() + 1);
+
+  while (
+    holidays.some(
+      h =>
+        formatDateLocal(h.date) ===
+        formatDateLocal(temp)
+    )
+  ) {
+
+    extra++;
+
+    temp.setDate(temp.getDate() + 1);
+  }
+
+  return extra;
+}
+
 // 🔹 Get adjacent leaves
-async function getAdjacentLeaves(employeeId, start, end, leaveType, includePending = false) {
+async function getAdjacentLeaves(
+  employeeId,
+  start,
+  end,
+  leaveType,
+  includePending = false
+) {
+
   const statusFilter = includePending
-    ? { $in: ["pending", "approved"] } // UI preview
-    : "approved"; // final logic
+    ? { $in: ["pending", "approved"] }
+    : "approved";
+
+  // :fire: only nearby previous leave
   const prev = await Leave.findOne({
     employee: employeeId,
     leaveType,
-    // status: "approved",
-    // status: { $in: ["pending", "approved"] },
     status: statusFilter,
-    dateTo: { $lt: start },
+
+    dateTo: {
+      $gte: new Date(start.getTime() - 7 * 24 * 60 * 60 * 1000),
+      $lt: start
+    }
+
   }).sort({ dateTo: -1 });
 
+  // :fire: only nearby next leave
   const next = await Leave.findOne({
     employee: employeeId,
     leaveType,
-    //status: "approved",
-    //status: { $in: ["pending", "approved"] },
     status: statusFilter,
-    dateFrom: { $gt: end },
+
+    dateFrom: {
+      $lte: new Date(end.getTime() + 7 * 24 * 60 * 60 * 1000),
+      $gt: end
+    }
+
   }).sort({ dateFrom: 1 });
 
   return { prev, next };
+}
+
+async function rebuildLeaveChain(
+  employeeId,
+  leaveType,
+  holidays,
+  weeklyOffData
+) {
+
+  const leaves = await Leave.find({
+    employee: employeeId,
+    leaveType,
+    status: "approved"
+  }).sort({ dateFrom: 1 });
+
+  if (!leaves.length) return;
+
+  // reset
+  for (const l of leaves) {
+    l.isMerged = false;
+    l.totalDays = calculateBaseDays(
+      new Date(l.dateFrom),
+      new Date(l.dateTo),
+      l.duration
+    );
+    await l.save();
+  }
+
+  let chain = [leaves[0]];
+
+  for (let i = 1; i < leaves.length; i++) {
+
+    const prev =
+      chain[chain.length - 1];
+
+    const current =
+      leaves[i];
+
+    let temp =
+      new Date(prev.dateTo);
+
+    temp.setDate(temp.getDate() + 1);
+
+    let connected = true;
+
+    while (
+      temp < new Date(current.dateFrom)
+    ) {
+
+      if (
+        !isOffDay(
+          temp,
+          holidays,
+          weeklyOffData
+        )
+      ) {
+        connected = false;
+        break;
+      }
+
+      temp.setDate(temp.getDate() + 1);
+    }
+
+    if (connected) {
+
+      chain.push(current);
+
+    } else {
+
+      await saveChain(
+        chain,
+        holidays,
+        weeklyOffData
+      );
+
+      chain = [current];
+    }
+  }
+
+  await saveChain(
+    chain,
+    holidays,
+    weeklyOffData
+  );
+}
+
+async function saveChain(
+  chain,
+  holidays,
+  weeklyOffData
+) {
+
+  if (!chain.length) return;
+
+  const first = chain[0];
+
+  let start =
+    new Date(first.dateFrom);
+
+  let end =
+    new Date(
+      chain[chain.length - 1].dateTo
+    );
+
+  // =====================================
+  // :fire: MULTIPLE LEAVE CHAIN
+  // leave + weekend + leave
+  // =====================================
+
+  if (chain.length > 1) {
+
+    let temp = new Date(end);
+
+    temp.setDate(temp.getDate() + 1);
+
+    // forward holiday extension
+    while (
+      isOffDay(
+        temp,
+        holidays,
+        weeklyOffData
+      )
+    ) {
+
+      end = new Date(temp);
+
+      temp.setDate(temp.getDate() + 1);
+    }
+  }
+
+  // =====================================
+  // :fire: SINGLE LEAVE CASE
+  // holiday + leave + holiday
+  // =====================================
+
+  else {
+
+    let before = new Date(start);
+    before.setDate(before.getDate() - 1);
+
+    let after = new Date(end);
+    after.setDate(after.getDate() + 1);
+
+    const beforeOff =
+      isOffDay(
+        before,
+        holidays,
+        weeklyOffData
+      );
+
+    const afterOff =
+      isOffDay(
+        after,
+        holidays,
+        weeklyOffData
+      );
+
+    // BOTH SIDES OFF
+    if (beforeOff && afterOff) {
+
+      // backward extend
+      while (
+        isOffDay(
+          before,
+          holidays,
+          weeklyOffData
+        )
+      ) {
+
+        start = new Date(before);
+
+        before.setDate(
+          before.getDate() - 1
+        );
+      }
+
+      // forward extend
+      while (
+        isOffDay(
+          after,
+          holidays,
+          weeklyOffData
+        )
+      ) {
+
+        end = new Date(after);
+
+        after.setDate(
+          after.getDate() + 1
+        );
+      }
+    }
+  }
+
+  // =====================================
+  // :fire: FINAL TOTAL
+  // =====================================
+
+  const totalDays =
+    Math.ceil(
+      (
+        end - start
+      ) /
+      (1000 * 60 * 60 * 24)
+    ) + 1;
+
+  // =====================================
+  // :fire: MASTER LEAVE
+  // =====================================
+
+  first.totalDays = totalDays;
+
+  first.isMerged = false;
+
+  first.isSandwich =
+    totalDays >
+    calculateBaseDays(
+      new Date(first.dateFrom),
+      new Date(first.dateTo),
+      first.duration
+    );
+
+  // =====================================
+  // :fire: PAID / LWP
+  // =====================================
+
+  if (first.leaveType === "LWP") {
+
+    first.paidDays = 0;
+
+    first.lwpDays = totalDays;
+
+  } else {
+
+    first.paidDays = totalDays;
+
+    first.lwpDays = 0;
+  }
+
+  await first.save();
+
+  // =====================================
+  // :fire: MERGED LEAVES
+  // =====================================
+
+  for (let i = 1; i < chain.length; i++) {
+
+    chain[i].totalDays = 0;
+
+    chain[i].paidDays = 0;
+
+    chain[i].lwpDays = 0;
+
+    chain[i].isMerged = true;
+
+    chain[i].isSandwich = true;
+
+    await chain[i].save();
+  }
 }
 
 // 🔥 Get final day status
@@ -3307,6 +3611,107 @@ const calculateTotalLeaveDays = (
 // Sandwich Leave Logic (HR Policy Based)
 // ===============================
 
+async function recalculateEmployeeLeaveBalances(employeeId) {
+
+  const employee =
+    await User.findById(employeeId);
+
+  if (!employee) return;
+
+  // =====================================
+  // :white_check_mark: ORIGINAL YEARLY ALLOCATION
+  // =====================================
+
+  const TOTAL_SL =
+    employee.totalSickLeave || 0;
+
+  const TOTAL_CL =
+    employee.totalCasualLeave || 0;
+
+  // =====================================
+  // :white_check_mark: ONLY MAIN APPROVED LEAVES
+  // =====================================
+
+  const approvedLeaves =
+    await Leave.find({
+      employee: employeeId,
+      status: "approved",
+      isMerged: false
+    });
+
+  let usedSL = 0;
+  let usedCL = 0;
+  let usedLWP = 0;
+
+  // =====================================
+  // :white_check_mark: CALCULATE USED LEAVES
+  // =====================================
+
+  for (const leave of approvedLeaves) {
+
+    // ---------------------------------
+    // :white_check_mark: Sick Leave
+    // ---------------------------------
+
+    if (leave.leaveType === "SL") {
+
+      usedSL += leave.paidDays || 0;
+
+      usedLWP += leave.lwpDays || 0;
+    }
+
+    // ---------------------------------
+    // :white_check_mark: Casual Leave
+    // ---------------------------------
+
+    else if (leave.leaveType === "CL") {
+
+      usedCL += leave.paidDays || 0;
+
+      usedLWP += leave.lwpDays || 0;
+    }
+
+    // ---------------------------------
+    // :white_check_mark: Pure LWP
+    // ---------------------------------
+
+    else if (leave.leaveType === "LWP") {
+
+      usedLWP += leave.totalDays || 0;
+    }
+  }
+
+  // =====================================
+  // :white_check_mark: FINAL BALANCES
+  // =====================================
+
+  employee.sickLeaveBalance =
+    Math.max(0, TOTAL_SL - usedSL);
+
+  employee.casualLeaveBalance =
+    Math.max(0, TOTAL_CL - usedCL);
+
+  employee.LwpLeave =
+    Math.max(0, usedLWP);
+
+  // =====================================
+  // SAVE
+  // =====================================
+
+  await employee.save();
+
+  return {
+    sickLeaveBalance:
+      employee.sickLeaveBalance,
+
+    casualLeaveBalance:
+      employee.casualLeaveBalance,
+
+    LwpLeave:
+      employee.LwpLeave
+  };
+}
+
 
 // 🟢 Main route — approve/reject leave with sandwich logic
 app.put("/leave/:leaveId/status", async (req, res) => {
@@ -3315,7 +3720,7 @@ app.put("/leave/:leaveId/status", async (req, res) => {
       year: new Date().getFullYear(),
     });
 
-    // 🔥 ALSO ADD HOLIDAYS (you are using it too)
+    // :fire: ALSO ADD HOLIDAYS (you are using it too)
     const holidayDocs = await Holiday.find();
 
     const holidays = holidayDocs.map(h => ({
@@ -3336,6 +3741,8 @@ app.put("/leave/:leaveId/status", async (req, res) => {
     const leave = await Leave.findById(leaveId).populate("employee");
     if (!leave) return res.status(404).json({ error: "Leave not found" });
 
+    const oldStatus = leave.status;
+
     const employee = leave.employee;
     if (!employee) return res.status(404).json({ error: "Employee not found" });
 
@@ -3343,7 +3750,7 @@ app.put("/leave/:leaveId/status", async (req, res) => {
       return res.status(403).json({ error: "Not authorized" });
     }
     // ============================
-// 🔥 RESTORE LOGIC (IMPORTANT)
+// :fire: RESTORE LOGIC (IMPORTANT)
 // ============================
 
 // If already approved and now rejecting → restore balance
@@ -3363,11 +3770,11 @@ if (leave.status === "approved" && status === "rejected") {
 
   await employee.save();
 
-  // 🔥 RE-CALCULATE ADJACENT LEAVES AFTER REJECTION
+  // :fire: RE-CALCULATE ADJACENT LEAVES AFTER REJECTION
 
 const employeeId = leave.employee._id;
 
-  // 🔥 FIX ADJACENT LEAVE (REMOVE SANDWICH EFFECT)
+  // :fire: FIX ADJACENT LEAVE (REMOVE SANDWICH EFFECT)
   const { prev, next } = await getAdjacentLeaves(
     employeeId,
     new Date(leave.dateFrom),
@@ -3375,17 +3782,12 @@ const employeeId = leave.employee._id;
     leave.leaveType,
   );
 
-  if (next && next.status === "approved") {
-
-    let newTotal = calculateBaseDays(
-      new Date(next.dateFrom),
-      new Date(next.dateTo),
-      next.duration
-    );
-
-    // next.totalDays = newTotal;
-    // next.isSandwich = false;
-
+  //if (next && next.status === "approved")
+  if (
+  next &&
+  next.status === "approved" &&
+  !next.isMerged
+) {
     const recalculated = await calculateWithSandwich(
   employee._id,
   new Date(next.dateFrom),
@@ -3403,49 +3805,51 @@ next.isSandwich = recalculated > calculateBaseDays(
   next.duration
 );
 
-    // 🔹 recalc paid/lwp
+    // :small_blue_diamond: recalc paid/lwp
     if (next.leaveType === "SL") {
       const available = employee.sickLeaveBalance;
 
-      if (available >= newTotal) {
-        next.paidDays = newTotal;
+      if (available >= recalculated) {
+        //next.paidDays = newTotal;
+        next.paidDays = recalculated;
         next.lwpDays = 0;
       } else {
         next.paidDays = available;
-        next.lwpDays = newTotal - available;
+        //next.lwpDays = newTotal - available;
+        next.lwpDays = recalculated - available;
       }
     }
 
     else if (next.leaveType === "CL") {
       const available = employee.casualLeaveBalance;
 
-      if (available >= newTotal) {
-        next.paidDays = newTotal;
+      if (available >= recalculated) {
+        //next.paidDays = newTotal;
+        next.paidDays = recalculated;
         next.lwpDays = 0;
       } else {
         next.paidDays = available;
-        next.lwpDays = newTotal - available;
+        //next.lwpDays = newTotal - available;
+        next.lwpDays = recalculated - available;
       }
     }
 
     else if (next.leaveType === "LWP") {
       next.paidDays = 0;
-      next.lwpDays = newTotal;
+      //next.lwpDays = newTotal;
+      next.lwpDays = recalculated;
     }
 
     await next.save();
   }
 
-  if (prev && prev.status === "approved") {
-
-  let newTotal = calculateBaseDays(
-    new Date(prev.dateFrom),
-    new Date(prev.dateTo),
-    prev.duration
-  );
-
-  // prev.totalDays = newTotal;
-  // prev.isSandwich = false;
+  //if (prev && prev.status === "approved")
+  if (
+    prev &&
+    prev.status === "approved" &&
+    !prev.isMerged
+  )
+  {
 
   const recalculatedPrev = await calculateWithSandwich(
   employee._id,
@@ -3464,160 +3868,94 @@ prev.isSandwich = recalculatedPrev > calculateBaseDays(
   prev.duration
 );
 
+// :small_blue_diamond: recalc paid/lwp for PREV
+
+if (prev.leaveType === "SL") {
+
+  const available =
+    employee.sickLeaveBalance;
+
+  if (available >= recalculatedPrev) {
+
+    prev.paidDays =
+      recalculatedPrev;
+
+    prev.lwpDays = 0;
+
+  } else {
+
+    prev.paidDays =
+      available;
+
+    prev.lwpDays =
+      recalculatedPrev - available;
+  }
+}
+
+else if (prev.leaveType === "CL") {
+
+  const available =
+    employee.casualLeaveBalance;
+
+  if (available >= recalculatedPrev) {
+
+    prev.paidDays =
+      recalculatedPrev;
+
+    prev.lwpDays = 0;
+
+  } else {
+
+    prev.paidDays =
+      available;
+
+    prev.lwpDays =
+      recalculatedPrev - available;
+  }
+}
+
+else if (prev.leaveType === "LWP") {
+
+  prev.paidDays = 0;
+
+  prev.lwpDays =
+    recalculatedPrev;
+}
+
   await prev.save();
 }
-// for (let l of otherLeaves) {
 
-//   l.isMerged = false;
+leave.status = status;
 
-//   const leaveStart = new Date(l.dateFrom);
-//   const leaveEnd = new Date(l.dateTo);
+leave.approvedBy = userId;
 
-//   let newTotal = calculateBaseDays(
-//     new Date(l.dateFrom),
-//     new Date(l.dateTo),
-//     l.duration
-//   );
+leave.approvedByRole = role;
 
-//   l.totalDays = newTotal;
+await leave.save();
 
-//   // 🔥 SL
-//   if (l.leaveType === "SL") {
-//     const available = employee.sickLeaveBalance;
+await rebuildLeaveChain(
+  employee._id,
+  leave.leaveType,
+  holidays,
+  weeklyOffData
+);
 
-//     if (available >= newTotal) {
-//       l.paidDays = newTotal;
-//       l.lwpDays = 0;
-//     } else {
-//       l.paidDays = available;
-//       l.lwpDays = newTotal - available;
-//     }
-//   }
-
-//   // 🔥 CL
-//   else if (l.leaveType === "CL") {
-//     const available = employee.casualLeaveBalance;
-
-//     if (available >= newTotal) {
-//       l.paidDays = newTotal;
-//       l.lwpDays = 0;
-//     } else {
-//       l.paidDays = available;
-//       l.lwpDays = newTotal - available;
-//     }
-//   }
-
-//   // 🔥 LWP
-//   else if (l.leaveType === "LWP") {
-//     l.paidDays = 0;
-//     l.lwpDays = newTotal;
-//   }
-
-//   await l.save(); 
-// }
+await recalculateEmployeeLeaveBalances(
+  employee._id
+);
 }
 
-    // 🚨 Prevent double processing
+    // :rotating_light: Prevent double processing
     if (leave.status === "approved" && status === "approved") {
       return res.status(400).json({ error: "Leave already approved" });
     }
 // ==============================
-// 🔥 SANDWICH USING ATTENDANCE
+// :fire: SANDWICH USING ATTENDANCE
 // ==============================
 
 let extraLwpDays = 0;
 
-// if (status === "approved" && leave.status !== "approved" && extraDays === 0) {
-
-//   const prevDay = new Date(leave.dateFrom);
-//   prevDay.setDate(prevDay.getDate() - 1);
-
-//   const nextDay = new Date(leave.dateTo);
-//   nextDay.setDate(nextDay.getDate() + 1);
-
-//   const prevStatus = await getDayStatus(employee._id, prevDay);
-//   const nextStatus = await getDayStatus(employee._id, nextDay);
-
-//   let weekendDays = [];
-//   let temp = new Date(prevDay);
-
-//   while (temp <= nextDay) {
-//     if (getDayOfWeek(temp) === 0 || isOffDay(temp, holidays, weeklyOffData)) {
-//       weekendDays.push(new Date(temp));
-//     }
-//     temp.setDate(temp.getDate() + 1);
-//   }
-
-//   if (weekendDays.length > 0) {
-
-//     if (prevStatus === "ABSENT" && nextStatus === "ABSENT") {
-//       extraLwpDays += weekendDays.length;
-//     }
-
-//     if (prevStatus === "LEAVE" && nextStatus === "ABSENT") {
-//       extraLwpDays += weekendDays.length;
-//     }
-
-//     if (prevStatus === "ABSENT" && nextStatus === "LEAVE") {
-//       extraLwpDays += weekendDays.length;
-//     }
-//   }
-// }
-
-// ============================
-// ✅ APPROVAL LOGIC
-// ============================
-
-const { prev, next } = await getAdjacentLeaves(
-  employee._id,
-  new Date(leave.dateFrom),
-  new Date(leave.dateTo),
-  leave.leaveType,
-  false
-);
-
-let totalDays = calculateBaseDays(
-  new Date(leave.dateFrom),
-  new Date(leave.dateTo),
-  leave.duration
-);
-
-let extraDays = 0;
-if (status === "approved") {
-if (prev) {
-  extraDays += getSandwichDays(
-      prev.dateTo,
-      new Date(leave.dateFrom),
-      holidays,
-      weeklyOffData
-    );
-}
-
-if (next) {
-  extraDays += getSandwichDays(
-      new Date(leave.dateTo),
-      next.dateFrom,
-      holidays,
-      weeklyOffData
-    );
-}
-
-totalDays += extraDays;
-leave.isSandwich = extraDays > 0;
-}
-else {
-  // rejected → no sandwich
-  leave.isSandwich = false;
-}
-
-leave.totalDays = totalDays;
-leave.isSandwich = (totalDays > calculateBaseDays(
-  new Date(leave.dateFrom),
-  new Date(leave.dateTo),
-  leave.duration
-));
-
-if (status === "approved" && leave.status !== "approved" && extraDays === 0) {
+if (status === "approved" && oldStatus !== "approved") {
 
   const prevDay = new Date(leave.dateFrom);
   prevDay.setDate(prevDay.getDate() - 1);
@@ -3653,106 +3991,195 @@ if (status === "approved" && leave.status !== "approved" && extraDays === 0) {
     }
   }
 }
-const totalLeaveDays = leave.totalDays || 0;
 
-// Use preview if already calculated
-let paidDays = leave.paidDays || 0;
-let lwpDays = leave.lwpDays || 0;
+if (
+  status === "approved" &&
+  oldStatus !== "approved"
+) {
 
-if (status === "approved" && leave.status !== "approved") {
+  // =====================================
+  // :fire: STEP 1: SAVE STATUS FIRST
+  // =====================================
 
-  if (leave.isMerged) {
-  leave.totalDays = 0;
-  leave.paidDays = 0;
-  leave.lwpDays = 0;
-
-  // STOP ANY FURTHER PROCESSING
   leave.status = status;
   leave.approvedBy = userId;
   leave.approvedByRole = role;
 
   await leave.save();
 
-  
-  return res.json({
-    message: "Merged leave approved",
-    leave,
-  });
+  // =====================================
+  // :fire: STEP 2: REBUILD GLOBAL CHAIN
+  // =====================================
+
+  await rebuildLeaveChain(
+    employee._id,
+    leave.leaveType,
+    holidays,
+    weeklyOffData
+  );
+
+  // =====================================
+  // :fire: STEP 3: RELOAD UPDATED LEAVE
+  // =====================================
+
+  const refreshedLeave =
+    await Leave.findById(leave._id);
+
+  // merged leave should not deduct
+  // if (refreshedLeave.isMerged) {
+
+  //   return res.json({
+  //     message: "Merged leave approved",
+  //     leave: refreshedLeave
+  //   });
+  // }
+  if (refreshedLeave.isMerged) {
+
+  refreshedLeave.totalDays = 0;
+  refreshedLeave.paidDays = 0;
+  refreshedLeave.lwpDays = 0;
+
+  await refreshedLeave.save();
+
+  // :fire: IMPORTANT
+  await recalculateEmployeeLeaveBalances(
+    employee._id
+  );
+
+  leave.isMerged = true;
+
+  leave.totalDays = 0;
+
+  leave.paidDays = 0;
+
+  leave.lwpDays = 0;
+
+  leave.isSandwich =
+    refreshedLeave.isSandwich;
 }
 
-  // 🔥 If not calculated earlier, calculate now
-  if (!leave.isMerged && paidDays === 0 && lwpDays === 0) {
+else {
 
-    if (leave.leaveType === "SL") {
-      const available = employee.sickLeaveBalance;
+  // =====================================
+  // :fire: STEP 4: RELOAD EMPLOYEE
+  // =====================================
 
-      if (available >= totalLeaveDays) {
-        paidDays = totalLeaveDays;
-      } else {
-        paidDays = available;
-        lwpDays = totalLeaveDays - available;
-      }
+  const refreshedEmployee =
+    await User.findById(employee._id);
+
+  // =====================================
+  // :fire: STEP 5: FINAL TOTAL DAYS
+  // =====================================
+
+  const totalLeaveDays =
+    refreshedLeave.totalDays;
+
+  let paidDays = 0;
+  let lwpDays = 0;
+
+  // =====================================
+  // :fire: STEP 6: SL
+  // =====================================
+
+  if (refreshedLeave.leaveType === "SL") {
+
+    const available =
+      refreshedEmployee.sickLeaveBalance;
+
+    if (available >= totalLeaveDays) {
+
+      paidDays = totalLeaveDays;
+
+    } else {
+
+      paidDays = available;
+
+      lwpDays =
+        totalLeaveDays - available;
     }
+  }
 
-    else if (leave.leaveType === "CL") {
-      const available = employee.casualLeaveBalance;
+  // =====================================
+  // :fire: STEP 7: CL
+  // =====================================
 
-      if (available >= totalLeaveDays) {
-        paidDays = totalLeaveDays;
-      } else {
-        paidDays = available;
-        lwpDays = totalLeaveDays - available;
-      }
+  else if (refreshedLeave.leaveType === "CL") {
+
+    const available =
+      refreshedEmployee.casualLeaveBalance;
+
+    if (available >= totalLeaveDays) {
+
+      paidDays = totalLeaveDays;
+
+    } else {
+
+      paidDays = available;
+
+      lwpDays =
+        totalLeaveDays - available;
     }
-
-    else if (leave.leaveType === "LWP") {
-      lwpDays = totalLeaveDays;
-    }
   }
 
-  // ============================
-  // 🔥 APPLY DEDUCTION (ALWAYS)
-  // ============================
+  // =====================================
+  // :fire: STEP 8: PURE LWP
+  // =====================================
 
-  if (leave.leaveType === "SL") {
-    employee.sickLeaveBalance -= paidDays;
+  else if (refreshedLeave.leaveType === "LWP") {
+
+    lwpDays = totalLeaveDays;
   }
 
-  else if (leave.leaveType === "CL") {
-    employee.casualLeaveBalance -= paidDays;
+  // =====================================
+  // :fire: STEP 9: SAVE FINAL BREAKDOWN
+  // =====================================
+
+  refreshedLeave.paidDays = paidDays;
+
+  if (refreshedLeave.leaveType === "LWP") {
+
+    refreshedLeave.lwpDays =
+      lwpDays + extraLwpDays;
+  } else {
+    refreshedLeave.lwpDays =
+      lwpDays;
   }
 
-  let totalLwpDays = lwpDays;
+  await refreshedLeave.save();
 
-  // Only apply attendance LWP for pure LWP type
-  if (leave.leaveType === "LWP") {
-    totalLwpDays += extraLwpDays;
-  }
+  // =====================================
+  // :fire: STEP 10: RECALCULATE BALANCE
+  // =====================================
 
-  if (totalLwpDays > 0) {
-    employee.LwpLeave += totalLwpDays;
-  }
+  await recalculateEmployeeLeaveBalances(
+    employee._id
+  );
 
-  
+  leave.totalDays =
+    refreshedLeave.totalDays;
 
-  // ============================
-  // ✅ SAVE BREAKDOWN
-  // ============================
-  leave.paidDays = paidDays;
-  leave.lwpDays = totalLwpDays;
-  
+  leave.paidDays =
+    refreshedLeave.paidDays;
 
-  await employee.save();
+  leave.lwpDays =
+    refreshedLeave.lwpDays;
+
+  leave.isMerged =
+    refreshedLeave.isMerged;
+
+  leave.isSandwich =
+    refreshedLeave.isSandwich;
+}
 }
 
-    // ============================
-    // ✅ UPDATE STATUS
-    // ============================
-    leave.status = status;
-    leave.approvedBy = userId;
-    leave.approvedByRole = role;
+else {
 
-    await leave.save();
+  leave.status = status;
+  leave.approvedBy = userId;
+  leave.approvedByRole = role;
+
+  await leave.save();
+}
 
 // // find nearby leaves
 // const nearbyLeaves = await Leave.find({
@@ -3760,7 +4187,7 @@ if (status === "approved" && leave.status !== "approved") {
 //   status: { $in: ["pending", "approved"] }
 // }).sort({ dateFrom: 1 });
     // ============================
-    // 🔔 NOTIFICATIONS
+    // :bell: NOTIFICATIONS
     // ============================
     let finalRole = role.toUpperCase();
     if (role === "Team_Leader") finalRole = "Team_Leader";
@@ -3835,15 +4262,14 @@ if (status === "approved" && leave.status !== "approved") {
         createdAt: new Date()
       });
     }
-
     // ============================
-    // ✅ FINAL RESPONSE
+    // :white_check_mark: FINAL RESPONSE
     // ============================
     return res.json({
       message: `Leave ${status} successfully`,
       leave,
       breakdown: {
-        totalDays: totalLeaveDays,
+        totalDays: leave.totalDays,
         paidDays: leave.paidDays || 0,
         lwpDays: leave.lwpDays || 0,
       },
@@ -3952,17 +4378,36 @@ app.post("/attendance/regularization/apply", async (req, res) => {
     //     error: "Check-in and check-out times must be within 9:00 AM to 6:00 PM",
     //   });
     // }
-
     // Validation 3: Reason ≤ 20 words
-    if (reason) {
-      const wordCount = reason.trim().split(/\s+/).length;
-      if (wordCount > 10) {
+    // if (reason) {
+    //   const wordCount = reason.trim().split(/\s+/).length;
+    //   if (wordCount > 10) {
+    //     return res.status(400).json({
+    //       error: "Reason cannot exceed 20 words",
+    //     });
+    //   }
+    // }
+
+      const startOfMonth = new Date(targetDate.getFullYear(), targetDate.getMonth(), 1);
+      const endOfMonth = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 0);
+
+      const monthlyRegularizationCount = await Attendance.countDocuments({
+        employee: employeeId,
+        date: {
+          $gte: startOfMonth,
+          $lte: endOfMonth,
+        },
+        "regularizationRequest.status": {
+          $in: ["Pending", "Approved"],
+        },
+      });
+
+      if (monthlyRegularizationCount >= 3) {
         return res.status(400).json({
-          error: "Reason cannot exceed 20 words",
+          error: "You can submit only 3 regularization requests in a month",
         });
       }
-    }
-
+    
     const employee = await User.findById(employeeId);
     if (!employee) return res.status(404).json({ error: "Employee not found" });
 
